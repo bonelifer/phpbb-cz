@@ -3,7 +3,9 @@
 # any fatal or error finding; warnings and notices are reported but do not fail.
 #
 # The weekly schedule catches a new phpBB release that a passing pack no longer
-# satisfies. Publishing a release is deliberately not part of this workflow.
+# satisfies. If the weekly run fails, an issue is opened and assigned to the
+# repository owner (set OPEN_ISSUE_ON_FAILURE below to "false" to turn this off).
+# Publishing a release is deliberately not part of this workflow.
 name: Validate language pack
 
 on:
@@ -27,6 +29,8 @@ env:
   # one that supports 3.3; its master branch only supports 4.0.
   PHPBB_LINE: "3.3"
   VALIDATOR_BRANCH: "1.6.x"
+  # "true": a failed weekly run opens an issue for the repository owner.
+  OPEN_ISSUE_ON_FAILURE: "true"
 
 jobs:
   validate:
@@ -127,3 +131,41 @@ jobs:
             exit 1
           fi
           echo "Validation passed."
+
+  notify:
+    name: Open an issue if the weekly check fails
+    needs: validate
+    if: ${{ always() && needs.validate.result == 'failure' && github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the issue
+        if: env.OPEN_ISSUE_ON_FAILURE == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          title="Language pack does not pass the phpBB validator"
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          body="The weekly check found that the language pack does not pass the phpBB Translation Validator.
+
+          This can happen after a new phpBB release. See the \"Validate\" step of the run for the list of findings:
+
+          $run_url
+
+          Please close this issue when the pack passes again."
+          number="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "\"$title\" in:title" --json number --jq '.[0].number // empty')"
+          if [[ -n "$number" ]]; then
+            gh issue comment "$number" --repo "$GITHUB_REPOSITORY" \
+              --body "The check failed again: $run_url"
+          else
+            # Assign the repository owner so they are notified. If the owner
+            # cannot be assigned (for example an organization), open it unassigned.
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body" \
+              --assignee "$OWNER" \
+              || gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi
